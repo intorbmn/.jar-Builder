@@ -1,0 +1,81 @@
+name: Build mod jar
+
+on:
+  push:
+    paths:
+      - "inbox/**"
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: "Link tải trực tiếp file .zip mã nguồn (để trống nếu dùng thư mục inbox)"
+        required: false
+        default: ""
+      java_version:
+        description: "Phiên bản Java"
+        required: false
+        default: "25"
+      gradle_version:
+        description: "Phiên bản Gradle (nếu dự án không có gradlew)"
+        required: false
+        default: "9.7.1"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Lấy mã nguồn
+        env:
+          ZIP_URL: ${{ inputs.zip_url }}
+        run: |
+          mkdir -p work
+          if [ -n "$ZIP_URL" ]; then
+            curl -fsSL "$ZIP_URL" -o source.zip
+          else
+            ZIP=$(git diff-tree --root --no-commit-id --name-only -r HEAD -- 'inbox/*.zip' | head -1)
+            [ -z "$ZIP" ] && ZIP=$(ls inbox/*.zip 2>/dev/null | tail -1)
+            [ -z "$ZIP" ] && { echo "::error::Không tìm thấy file .zip trong inbox/ và không có link"; exit 1; }
+            echo "Dùng file: $ZIP"
+            cp "$ZIP" source.zip
+          fi
+          unzip -q source.zip -d work
+          GRADLE_FILE=$(find work -maxdepth 3 \( -name build.gradle -o -name build.gradle.kts \) | head -1)
+          [ -z "$GRADLE_FILE" ] && { echo "::error::Không thấy build.gradle trong file zip"; exit 1; }
+          echo "PROJECT_DIR=$(dirname "$GRADLE_FILE")" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version || '25' }}
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ inputs.gradle_version || '9.7.1' }}
+
+      - name: Build
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ -f gradlew ]; then chmod +x gradlew && ./gradlew build; else gradle build; fi
+
+      - name: Lưu file jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: mod-jar
+          path: ${{ env.PROJECT_DIR }}/build/libs/*.jar
+
+      - name: Tạo Release để tải về dễ hơn
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          JARS=$(ls build/libs/*.jar | grep -v -- '-sources')
+          gh release create "build-${{ github.run_number }}" $JARS \
+            --repo "${{ github.repository }}" \
+            --title "Build #${{ github.run_number }}" \
+            --notes "Jar build tự động từ mã nguồn bạn gửi."
